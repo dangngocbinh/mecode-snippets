@@ -34,12 +34,91 @@ check_docker() {
     fi
 }
 
+# Check and install fzf if needed
+check_fzf() {
+    if command -v fzf &> /dev/null; then
+        return 0
+    fi
+
+    print_warning "fzf not found. Installing fzf for better UI experience..."
+
+    # Detect OS and install
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        # macOS
+        if command -v brew &> /dev/null; then
+            brew install fzf
+        else
+            print_error "Homebrew not found. Please install fzf manually: brew install fzf"
+            return 1
+        fi
+    elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        # Linux
+        if command -v apt-get &> /dev/null; then
+            sudo apt-get update && sudo apt-get install -y fzf
+        elif command -v yum &> /dev/null; then
+            sudo yum install -y fzf
+        elif command -v pacman &> /dev/null; then
+            sudo pacman -S fzf
+        else
+            print_error "Package manager not found. Please install fzf manually."
+            return 1
+        fi
+    else
+        print_error "Unsupported OS. Please install fzf manually."
+        return 1
+    fi
+
+    if command -v fzf &> /dev/null; then
+        print_success "fzf installed successfully!"
+        return 0
+    else
+        print_error "Failed to install fzf"
+        return 1
+    fi
+}
+
 # Get list of Docker volumes
 get_volumes() {
     docker volume ls --format "{{.Name}}" | sort
 }
 
-# Select volumes using numbered menu
+# Select volumes using fzf (interactive multi-select)
+select_volumes_fzf() {
+    local volumes=("$@")
+
+    echo "" >&2
+    print_info "Use arrow keys to navigate, TAB to select/deselect, ENTER to confirm" >&2
+    print_info "Type to search/filter volumes" >&2
+    echo "" >&2
+
+    # Use fzf with multi-select
+    local selected=$(printf '%s\n' "${volumes[@]}" | \
+        fzf --multi \
+            --height=40% \
+            --reverse \
+            --header="Select volumes (TAB to select, ENTER to confirm, ESC to select all)" \
+            --bind 'esc:select-all+accept' \
+            --prompt="Volumes > " \
+            --preview-window=hidden)
+
+    # If nothing selected or user cancelled, select all
+    if [ -z "$selected" ]; then
+        print_info "No selection or cancelled. Selecting ALL volumes..." >&2
+        selected=$(printf '%s\n' "${volumes[@]}")
+    fi
+
+    echo "" >&2
+    print_info "Selected volumes:" >&2
+    echo "$selected" | while read -r vol; do
+        [ -n "$vol" ] && echo "  - $vol" >&2
+    done
+    echo "" >&2
+
+    # Return selected volumes
+    echo "$selected"
+}
+
+# Select volumes using numbered menu (fallback)
 select_volumes_menu() {
     local volumes=("$@")
     local selected=()
@@ -201,8 +280,14 @@ main() {
         exit 1
     fi
 
-    # Select volumes
-    mapfile -t selected_volumes < <(select_volumes_menu "${volumes_list[@]}")
+    # Select volumes using fzf if available, otherwise fallback to numbered menu
+    if command -v fzf &> /dev/null; then
+        mapfile -t selected_volumes < <(select_volumes_fzf "${volumes_list[@]}")
+    else
+        print_warning "fzf not found. Using numbered menu (install fzf for better UI)"
+        echo ""
+        mapfile -t selected_volumes < <(select_volumes_menu "${volumes_list[@]}")
+    fi
 
     # Ask for destination
     echo ""

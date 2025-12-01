@@ -8,19 +8,29 @@ Công cụ backup và restore Docker volumes giữa các VPS hoặc lưu thành 
 - Chọn một hoặc nhiều Docker volumes để backup
 - Xuất ra file `.tar.gz` (bao gồm cả metadata)
 - Đồng bộ trực tiếp sang VPS khác qua SSH
-- Menu interactive dễ sử dụng
+- Menu interactive dễ sử dụng với `fzf`:
+  - Dùng phím mũi tên để di chuyển
+  - TAB để chọn/bỏ chọn volumes
+  - Gõ text để search/filter
+  - ESC để chọn tất cả
+  - Fallback về menu số nếu không có fzf
 
 ### Restore Script (`docker-volume-restore.sh`)
 - Khôi phục từ file backup `.tar.gz`
 - Khôi phục từ VPS từ xa
 - Tự động tạo volume mới hoặc ghi đè volume cũ
 - Cho phép đổi tên volume khi restore
+- Menu interactive với `fzf` (tương tự backup script)
 
 ## Yêu cầu
 
 - Docker đã cài đặt và đang chạy
 - SSH access đến VPS đích (nếu sync qua VPS)
 - Quyền thực thi script (đã được set)
+- `fzf` (optional, recommended) - Sẽ tự động cài nếu chưa có
+  - macOS: `brew install fzf`
+  - Ubuntu/Debian: `apt install fzf`
+  - CentOS/RHEL: `yum install fzf`
 
 ## Cách sử dụng
 

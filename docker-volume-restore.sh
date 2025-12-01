@@ -34,13 +34,117 @@ check_docker() {
     fi
 }
 
+# Check and install fzf if needed
+check_fzf() {
+    if command -v fzf &> /dev/null; then
+        return 0
+    fi
+
+    print_warning "fzf not found. Installing fzf for better UI experience..."
+
+    # Detect OS and install
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        # macOS
+        if command -v brew &> /dev/null; then
+            brew install fzf
+        else
+            print_error "Homebrew not found. Please install fzf manually: brew install fzf"
+            return 1
+        fi
+    elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        # Linux
+        if command -v apt-get &> /dev/null; then
+            sudo apt-get update && sudo apt-get install -y fzf
+        elif command -v yum &> /dev/null; then
+            sudo yum install -y fzf
+        elif command -v pacman &> /dev/null; then
+            sudo pacman -S fzf
+        else
+            print_error "Package manager not found. Please install fzf manually."
+            return 1
+        fi
+    else
+        print_error "Unsupported OS. Please install fzf manually."
+        return 1
+    fi
+
+    if command -v fzf &> /dev/null; then
+        print_success "fzf installed successfully!"
+        return 0
+    else
+        print_error "Failed to install fzf"
+        return 1
+    fi
+}
+
 # Find backup files in directory
 find_backup_files() {
     local backup_dir=$1
     find "$backup_dir" -type f -name "*.tar.gz" | sort
 }
 
-# Select backup files
+# Select backup files using fzf (interactive multi-select)
+select_backup_files_fzf() {
+    local backup_files=("$@")
+
+    if [ ${#backup_files[@]} -eq 0 ]; then
+        print_error "No backup files found" >&2
+        exit 1
+    fi
+
+    echo "" >&2
+    print_info "Use arrow keys to navigate, TAB to select/deselect, ENTER to confirm" >&2
+    print_info "Type to search/filter backups" >&2
+    echo "" >&2
+
+    # Prepare display list with filename and size
+    local display_list=()
+    local file_map=()
+    for file in "${backup_files[@]}"; do
+        local filename=$(basename "$file")
+        local size=$(du -h "$file" | cut -f1)
+        display_list+=("$filename ($size)")
+        file_map+=("$file")
+    done
+
+    # Use fzf with multi-select
+    local selected_display=$(printf '%s\n' "${display_list[@]}" | \
+        fzf --multi \
+            --height=40% \
+            --reverse \
+            --header="Select backups (TAB to select, ENTER to confirm, ESC to select all)" \
+            --bind 'esc:select-all+accept' \
+            --prompt="Backups > " \
+            --preview-window=hidden)
+
+    # Map back to full file paths
+    local selected=()
+    if [ -z "$selected_display" ]; then
+        print_info "No selection or cancelled. Selecting ALL backups..." >&2
+        selected=("${backup_files[@]}")
+    else
+        while IFS= read -r line; do
+            for i in "${!display_list[@]}"; do
+                if [ "${display_list[$i]}" = "$line" ]; then
+                    selected+=("${file_map[$i]}")
+                    break
+                fi
+            done
+        done <<< "$selected_display"
+    fi
+
+    echo "" >&2
+    print_info "Selected backups:" >&2
+    for file in "${selected[@]}"; do
+        echo "  - $(basename "$file")" >&2
+    done
+    echo "" >&2
+
+    # Return selected files
+    printf '%s\n' "${selected[@]}"
+}
+
+# Select backup files using numbered menu (fallback)
 select_backup_files() {
     local backup_files=("$@")
 
@@ -273,8 +377,14 @@ main() {
                 exit 1
             fi
 
-            # Select backups
-            mapfile -t selected_backups < <(select_backup_files "${backup_files[@]}")
+            # Select backups using fzf if available, otherwise fallback to numbered menu
+            if command -v fzf &> /dev/null; then
+                mapfile -t selected_backups < <(select_backup_files_fzf "${backup_files[@]}")
+            else
+                print_warning "fzf not found. Using numbered menu (install fzf for better UI)"
+                echo ""
+                mapfile -t selected_backups < <(select_backup_files "${backup_files[@]}")
+            fi
 
             echo ""
             read -p "Overwrite existing volumes without asking? (yes/no) [default: no]: " overwrite_all
