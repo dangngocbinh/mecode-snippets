@@ -1,6 +1,7 @@
 #!/bin/bash
 
-set -e
+# Don't use set -e to avoid early exit on non-critical errors
+# set -e
 
 # Colors for output
 RED='\033[0;31m'
