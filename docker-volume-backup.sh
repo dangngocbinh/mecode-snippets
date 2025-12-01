@@ -296,6 +296,12 @@ main() {
         fi
     fi
 
+    # Debug: show array count and contents
+    print_info "Total volumes to backup: ${#selected_volumes[@]}"
+    for i in "${!selected_volumes[@]}"; do
+        echo "  DEBUG [$i]: '${selected_volumes[$i]}'" >&2
+    done
+
     # Ask for destination
     echo ""
     print_info "Select backup destination:"
@@ -358,7 +364,11 @@ main() {
             local success_count=0
             local fail_count=0
 
+            print_info "Starting backup of ${#selected_volumes[@]} volume(s)..."
+            echo ""
+
             for volume in "${selected_volumes[@]}"; do
+                print_info "Processing volume $((success_count + fail_count + 1))/${#selected_volumes[@]}: $volume"
                 if sync_volume_to_remote "$volume" "$remote_host" "$remote_port" "$remote_path"; then
                     ((success_count++))
                 else
