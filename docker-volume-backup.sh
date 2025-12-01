@@ -1,0 +1,291 @@
+#!/bin/bash
+
+set -e
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Print colored message
+print_info() {
+    echo -e "${BLUE}[INFO]${NC} $1"
+}
+
+print_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
+
+print_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+print_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+# Check if Docker is running
+check_docker() {
+    if ! docker info &> /dev/null; then
+        print_error "Docker is not running or you don't have permission to access it"
+        exit 1
+    fi
+}
+
+# Get list of Docker volumes
+get_volumes() {
+    docker volume ls --format "{{.Name}}" | sort
+}
+
+# Select volumes using numbered menu
+select_volumes_menu() {
+    local volumes=("$@")
+    local selected=()
+
+    echo ""
+    print_info "Available Docker volumes:"
+    echo ""
+    echo "  0) [Select ALL volumes]"
+
+    for i in "${!volumes[@]}"; do
+        echo "  $((i+1))) ${volumes[$i]}"
+    done
+
+    echo ""
+    echo -e "${YELLOW}Enter volume numbers (comma-separated, e.g., 1,3,5) or 0 for all:${NC}"
+    read -r selection
+
+    # Parse selection
+    if [[ "$selection" == "0" ]]; then
+        selected=("${volumes[@]}")
+    else
+        IFS=',' read -ra numbers <<< "$selection"
+        for num in "${numbers[@]}"; do
+            num=$(echo "$num" | xargs) # trim whitespace
+            if [[ "$num" =~ ^[0-9]+$ ]] && [ "$num" -gt 0 ] && [ "$num" -le "${#volumes[@]}" ]; then
+                selected+=("${volumes[$((num-1))]}")
+            else
+                print_warning "Invalid selection: $num (skipped)"
+            fi
+        done
+    fi
+
+    if [ ${#selected[@]} -eq 0 ]; then
+        print_error "No volumes selected"
+        exit 1
+    fi
+
+    echo ""
+    print_info "Selected volumes:"
+    for vol in "${selected[@]}"; do
+        echo "  - $vol"
+    done
+
+    echo "${selected[@]}"
+}
+
+# Backup volume to tar.gz with metadata
+backup_volume_to_file() {
+    local volume_name=$1
+    local output_dir=$2
+    local timestamp=$(date +%Y%m%d_%H%M%S)
+    local backup_file="${output_dir}/${volume_name}_${timestamp}.tar.gz"
+
+    print_info "Backing up volume: $volume_name"
+
+    # Get volume metadata
+    local volume_info=$(docker volume inspect "$volume_name" 2>/dev/null)
+    if [ $? -ne 0 ]; then
+        print_error "Volume $volume_name does not exist"
+        return 1
+    fi
+
+    local mountpoint=$(echo "$volume_info" | grep -o '"Mountpoint": "[^"]*"' | cut -d'"' -f4)
+
+    # Create metadata file
+    local metadata_file="${output_dir}/${volume_name}_${timestamp}_metadata.json"
+    echo "$volume_info" > "$metadata_file"
+
+    # Create tar.gz of volume data
+    print_info "Creating archive: $backup_file"
+    docker run --rm \
+        -v "${volume_name}:/source:ro" \
+        -v "${output_dir}:/backup" \
+        alpine \
+        tar czf "/backup/$(basename "$backup_file")" -C /source .
+
+    if [ $? -eq 0 ]; then
+        # Add metadata to the archive
+        tar --append --file="${backup_file%.gz}" -C "$(dirname "$metadata_file")" "$(basename "$metadata_file")" 2>/dev/null || true
+        gzip -f "${backup_file%.gz}" 2>/dev/null || true
+
+        rm -f "$metadata_file"
+
+        local size=$(du -h "$backup_file" | cut -f1)
+        print_success "Backup completed: $backup_file ($size)"
+        echo "$backup_file"
+        return 0
+    else
+        print_error "Failed to backup volume: $volume_name"
+        rm -f "$metadata_file"
+        return 1
+    fi
+}
+
+# Sync volume to remote VPS
+sync_volume_to_remote() {
+    local volume_name=$1
+    local remote_host=$2
+    local remote_port=$3
+    local remote_path=$4
+
+    print_info "Syncing volume: $volume_name to $remote_host:$remote_port"
+
+    # Create temporary container to access volume
+    local container_name="volume_sync_${volume_name}_$$"
+
+    docker run -d --rm \
+        --name "$container_name" \
+        -v "${volume_name}:/data:ro" \
+        alpine \
+        sleep 3600 > /dev/null
+
+    if [ $? -ne 0 ]; then
+        print_error "Failed to create temporary container"
+        return 1
+    fi
+
+    # Create remote directory
+    print_info "Creating remote directory: ${remote_path}/${volume_name}"
+    ssh -p "$remote_port" "$remote_host" "mkdir -p ${remote_path}/${volume_name}" 2>/dev/null || true
+
+    # Sync using rsync
+    print_info "Transferring data..."
+    docker cp "${container_name}:/data/." - | ssh -p "$remote_port" "$remote_host" "cd ${remote_path}/${volume_name} && tar xf -"
+    local rsync_status=$?
+
+    # Cleanup
+    docker stop "$container_name" > /dev/null 2>&1
+
+    if [ $rsync_status -eq 0 ]; then
+        # Also send metadata
+        local metadata=$(docker volume inspect "$volume_name")
+        echo "$metadata" | ssh -p "$remote_port" "$remote_host" "cat > ${remote_path}/${volume_name}_metadata.json"
+
+        print_success "Successfully synced: $volume_name"
+        return 0
+    else
+        print_error "Failed to sync volume: $volume_name"
+        return 1
+    fi
+}
+
+# Main function
+main() {
+    echo ""
+    echo "=========================================="
+    echo "  Docker Volume Backup Tool"
+    echo "=========================================="
+    echo ""
+
+    check_docker
+
+    # Get volumes
+    local volumes_list=($(get_volumes))
+
+    if [ ${#volumes_list[@]} -eq 0 ]; then
+        print_error "No Docker volumes found"
+        exit 1
+    fi
+
+    # Select volumes
+    local selected_volumes=($(select_volumes_menu "${volumes_list[@]}"))
+
+    # Ask for destination
+    echo ""
+    print_info "Select backup destination:"
+    echo "  1) Export to local file (tar.gz)"
+    echo "  2) Sync to remote VPS (rsync)"
+    echo ""
+    read -p "Enter choice (1 or 2): " dest_choice
+
+    case $dest_choice in
+        1)
+            # Export to file
+            read -p "Enter output directory [default: ./backups]: " output_dir
+            output_dir=${output_dir:-./backups}
+
+            # Create output directory
+            mkdir -p "$output_dir"
+            output_dir=$(cd "$output_dir" && pwd) # Get absolute path
+
+            print_info "Output directory: $output_dir"
+            echo ""
+
+            local success_count=0
+            local fail_count=0
+
+            for volume in "${selected_volumes[@]}"; do
+                if backup_volume_to_file "$volume" "$output_dir"; then
+                    ((success_count++))
+                else
+                    ((fail_count++))
+                fi
+                echo ""
+            done
+
+            echo "=========================================="
+            print_success "Backup completed: $success_count succeeded, $fail_count failed"
+            print_info "Backup location: $output_dir"
+            echo "=========================================="
+            ;;
+
+        2)
+            # Sync to remote VPS
+            read -p "Enter remote host (user@ip): " remote_host
+            read -p "Enter SSH port [default: 22]: " remote_port
+            remote_port=${remote_port:-22}
+            read -p "Enter remote path [default: /tmp/docker-volumes]: " remote_path
+            remote_path=${remote_path:-/tmp/docker-volumes}
+
+            print_info "Remote destination: $remote_host:$remote_port:$remote_path"
+            echo ""
+
+            # Test SSH connection
+            print_info "Testing SSH connection..."
+            if ! ssh -p "$remote_port" -o ConnectTimeout=5 "$remote_host" "echo 'Connection successful'" &> /dev/null; then
+                print_error "Cannot connect to remote host"
+                exit 1
+            fi
+            print_success "SSH connection OK"
+            echo ""
+
+            local success_count=0
+            local fail_count=0
+
+            for volume in "${selected_volumes[@]}"; do
+                if sync_volume_to_remote "$volume" "$remote_host" "$remote_port" "$remote_path"; then
+                    ((success_count++))
+                else
+                    ((fail_count++))
+                fi
+                echo ""
+            done
+
+            echo "=========================================="
+            print_success "Sync completed: $success_count succeeded, $fail_count failed"
+            print_info "Remote location: $remote_host:$remote_path"
+            echo "=========================================="
+            ;;
+
+        *)
+            print_error "Invalid choice"
+            exit 1
+            ;;
+    esac
+}
+
+# Run main function
+main "$@"
