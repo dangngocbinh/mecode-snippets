@@ -286,9 +286,14 @@ main() {
     if command -v fzf &> /dev/null; then
         mapfile -t selected_volumes < <(select_volumes_fzf "${volumes_list[@]}")
     else
-        print_warning "fzf not found. Using numbered menu (install fzf for better UI)"
-        echo ""
-        mapfile -t selected_volumes < <(select_volumes_menu "${volumes_list[@]}")
+        # Try to install fzf
+        if check_fzf; then
+            mapfile -t selected_volumes < <(select_volumes_fzf "${volumes_list[@]}")
+        else
+            print_warning "Using numbered menu (install fzf for better UI)"
+            echo ""
+            mapfile -t selected_volumes < <(select_volumes_menu "${volumes_list[@]}")
+        fi
     fi
 
     # Ask for destination

@@ -312,9 +312,14 @@ main() {
             if command -v fzf &> /dev/null; then
                 mapfile -t selected_backups < <(select_backup_files_fzf "${backup_files[@]}")
             else
-                print_warning "fzf not found. Using numbered menu (install fzf for better UI)"
-                echo ""
-                mapfile -t selected_backups < <(select_backup_files "${backup_files[@]}")
+                # Try to install fzf
+                if check_fzf; then
+                    mapfile -t selected_backups < <(select_backup_files_fzf "${backup_files[@]}")
+                else
+                    print_warning "Using numbered menu (install fzf for better UI)"
+                    echo ""
+                    mapfile -t selected_backups < <(select_backup_files "${backup_files[@]}")
+                fi
             fi
 
             echo ""
@@ -379,7 +384,18 @@ main() {
             fi
 
             # Select backups using fzf if available, otherwise fallback to numbered menu
+            local use_fzf=false
             if command -v fzf &> /dev/null; then
+                use_fzf=true
+            else
+                # Try to install fzf
+                if check_fzf; then
+                    use_fzf=true
+                fi
+            fi
+
+            local selected_backup_files=()
+            if [ "$use_fzf" = true ]; then
                 # Prepare display list with filename and size from remote
                 local display_list=()
                 local file_map=()
@@ -404,7 +420,6 @@ main() {
                         --prompt="Remote Backups > " \
                         --preview-window=hidden)
 
-                local selected_backup_files=()
                 if [ -z "$selected_display" ]; then
                     print_info "No selection or cancelled. Selecting ALL backups..."
                     selected_backup_files=("${remote_backup_files[@]}")
@@ -420,7 +435,7 @@ main() {
                 fi
             else
                 # Fallback to numbered menu
-                print_warning "fzf not found. Using numbered menu (install fzf for better UI)"
+                print_warning "Using numbered menu (install fzf for better UI)"
                 echo ""
                 print_info "Available backup files on remote:"
                 echo ""
