@@ -44,17 +44,17 @@ select_volumes_menu() {
     local volumes=("$@")
     local selected=()
 
-    echo ""
-    print_info "Available Docker volumes:"
-    echo ""
-    echo "  0) [Select ALL volumes]"
+    echo "" >&2
+    print_info "Available Docker volumes:" >&2
+    echo "" >&2
+    echo "  0) [Select ALL volumes]" >&2
 
     for i in "${!volumes[@]}"; do
-        echo "  $((i+1))) ${volumes[$i]}"
+        echo "  $((i+1))) ${volumes[$i]}" >&2
     done
 
-    echo ""
-    echo -e "${YELLOW}Enter volume numbers (comma-separated, e.g., 1,3,5) or 0 for all:${NC}"
+    echo "" >&2
+    echo -e "${YELLOW}Enter volume numbers (comma-separated, e.g., 1,3,5) or 0 for all:${NC}" >&2
     read -r selection
 
     # Parse selection
@@ -67,23 +67,24 @@ select_volumes_menu() {
             if [[ "$num" =~ ^[0-9]+$ ]] && [ "$num" -gt 0 ] && [ "$num" -le "${#volumes[@]}" ]; then
                 selected+=("${volumes[$((num-1))]}")
             else
-                print_warning "Invalid selection: $num (skipped)"
+                print_warning "Invalid selection: $num (skipped)" >&2
             fi
         done
     fi
 
     if [ ${#selected[@]} -eq 0 ]; then
-        print_error "No volumes selected"
+        print_error "No volumes selected" >&2
         exit 1
     fi
 
-    echo ""
-    print_info "Selected volumes:"
+    echo "" >&2
+    print_info "Selected volumes:" >&2
     for vol in "${selected[@]}"; do
-        echo "  - $vol"
+        echo "  - $vol" >&2
     done
 
-    echo "${selected[@]}"
+    # Return selected volumes (one per line to stdout)
+    printf '%s\n' "${selected[@]}"
 }
 
 # Backup volume to tar.gz with metadata
@@ -193,7 +194,7 @@ main() {
     check_docker
 
     # Get volumes
-    local volumes_list=($(get_volumes))
+    mapfile -t volumes_list < <(get_volumes)
 
     if [ ${#volumes_list[@]} -eq 0 ]; then
         print_error "No Docker volumes found"
@@ -201,7 +202,7 @@ main() {
     fi
 
     # Select volumes
-    local selected_volumes=($(select_volumes_menu "${volumes_list[@]}"))
+    mapfile -t selected_volumes < <(select_volumes_menu "${volumes_list[@]}")
 
     # Ask for destination
     echo ""

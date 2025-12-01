@@ -45,23 +45,23 @@ select_backup_files() {
     local backup_files=("$@")
 
     if [ ${#backup_files[@]} -eq 0 ]; then
-        print_error "No backup files found"
+        print_error "No backup files found" >&2
         exit 1
     fi
 
-    echo ""
-    print_info "Available backup files:"
-    echo ""
-    echo "  0) [Restore ALL backups]"
+    echo "" >&2
+    print_info "Available backup files:" >&2
+    echo "" >&2
+    echo "  0) [Restore ALL backups]" >&2
 
     for i in "${!backup_files[@]}"; do
         local filename=$(basename "${backup_files[$i]}")
         local size=$(du -h "${backup_files[$i]}" | cut -f1)
-        echo "  $((i+1))) $filename ($size)"
+        echo "  $((i+1))) $filename ($size)" >&2
     done
 
-    echo ""
-    echo -e "${YELLOW}Enter backup numbers (comma-separated, e.g., 1,3,5) or 0 for all:${NC}"
+    echo "" >&2
+    echo -e "${YELLOW}Enter backup numbers (comma-separated, e.g., 1,3,5) or 0 for all:${NC}" >&2
     read -r selection
 
     local selected=()
@@ -76,23 +76,24 @@ select_backup_files() {
             if [[ "$num" =~ ^[0-9]+$ ]] && [ "$num" -gt 0 ] && [ "$num" -le "${#backup_files[@]}" ]; then
                 selected+=("${backup_files[$((num-1))]}")
             else
-                print_warning "Invalid selection: $num (skipped)"
+                print_warning "Invalid selection: $num (skipped)" >&2
             fi
         done
     fi
 
     if [ ${#selected[@]} -eq 0 ]; then
-        print_error "No backups selected"
+        print_error "No backups selected" >&2
         exit 1
     fi
 
-    echo ""
-    print_info "Selected backups:"
+    echo "" >&2
+    print_info "Selected backups:" >&2
     for file in "${selected[@]}"; do
-        echo "  - $(basename "$file")"
+        echo "  - $(basename "$file")" >&2
     done
 
-    echo "${selected[@]}"
+    # Return selected files (one per line to stdout)
+    printf '%s\n' "${selected[@]}"
 }
 
 # Extract volume name from backup filename
@@ -265,7 +266,7 @@ main() {
             backup_dir=$(cd "$backup_dir" && pwd) # Get absolute path
 
             # Find backup files
-            local backup_files=($(find_backup_files "$backup_dir"))
+            mapfile -t backup_files < <(find_backup_files "$backup_dir")
 
             if [ ${#backup_files[@]} -eq 0 ]; then
                 print_error "No backup files found in: $backup_dir"
@@ -273,7 +274,7 @@ main() {
             fi
 
             # Select backups
-            local selected_backups=($(select_backup_files "${backup_files[@]}"))
+            mapfile -t selected_backups < <(select_backup_files "${backup_files[@]}")
 
             echo ""
             read -p "Overwrite existing volumes without asking? (yes/no) [default: no]: " overwrite_all
