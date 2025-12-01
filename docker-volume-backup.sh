@@ -214,50 +214,52 @@ backup_volume_to_file() {
     fi
 }
 
-# Sync volume to remote VPS
+# Sync volume to remote VPS as tar.gz file
 sync_volume_to_remote() {
     local volume_name=$1
     local remote_host=$2
     local remote_port=$3
     local remote_path=$4
+    local timestamp=$(date +%Y%m%d_%H%M%S)
+    local backup_filename="${volume_name}_${timestamp}.tar.gz"
 
-    print_info "Syncing volume: $volume_name to $remote_host:$remote_port"
+    print_info "Backing up volume: $volume_name to $remote_host:$remote_port"
 
-    # Create temporary container to access volume
-    local container_name="volume_sync_${volume_name}_$$"
-
-    docker run -d --rm \
-        --name "$container_name" \
-        -v "${volume_name}:/data:ro" \
-        alpine \
-        sleep 3600 > /dev/null
-
+    # Get volume metadata
+    local volume_info=$(docker volume inspect "$volume_name" 2>/dev/null)
     if [ $? -ne 0 ]; then
-        print_error "Failed to create temporary container"
+        print_error "Volume $volume_name does not exist"
         return 1
     fi
 
     # Create remote directory
-    print_info "Creating remote directory: ${remote_path}/${volume_name}"
-    ssh -p "$remote_port" "$remote_host" "mkdir -p ${remote_path}/${volume_name}" 2>/dev/null || true
+    print_info "Creating remote directory: ${remote_path}"
+    ssh -p "$remote_port" "$remote_host" "mkdir -p ${remote_path}" 2>/dev/null || true
 
-    # Sync using rsync
-    print_info "Transferring data..."
-    docker cp "${container_name}:/data/." - | ssh -p "$remote_port" "$remote_host" "cd ${remote_path}/${volume_name} && tar xf -"
-    local rsync_status=$?
+    # Create tar.gz and send to remote directly via pipe
+    print_info "Creating and transferring backup file: $backup_filename"
+    docker run --rm \
+        -v "${volume_name}:/source:ro" \
+        alpine \
+        tar czf - -C /source . | \
+        ssh -p "$remote_port" "$remote_host" "cat > ${remote_path}/${backup_filename}"
 
-    # Cleanup
-    docker stop "$container_name" > /dev/null 2>&1
+    local transfer_status=$?
 
-    if [ $rsync_status -eq 0 ]; then
-        # Also send metadata
-        local metadata=$(docker volume inspect "$volume_name")
-        echo "$metadata" | ssh -p "$remote_port" "$remote_host" "cat > ${remote_path}/${volume_name}_metadata.json"
+    if [ $transfer_status -eq 0 ]; then
+        # Send metadata
+        local metadata_filename="${volume_name}_${timestamp}_metadata.json"
+        echo "$volume_info" | ssh -p "$remote_port" "$remote_host" "cat > ${remote_path}/${metadata_filename}"
 
-        print_success "Successfully synced: $volume_name"
+        # Get file size from remote
+        local remote_size=$(ssh -p "$remote_port" "$remote_host" "du -h ${remote_path}/${backup_filename} | cut -f1")
+
+        print_success "Successfully backed up: $backup_filename ($remote_size) to $remote_host:${remote_path}"
         return 0
     else
-        print_error "Failed to sync volume: $volume_name"
+        print_error "Failed to backup volume: $volume_name"
+        # Try to cleanup failed backup on remote
+        ssh -p "$remote_port" "$remote_host" "rm -f ${remote_path}/${backup_filename}" 2>/dev/null || true
         return 1
     fi
 }
@@ -361,8 +363,9 @@ main() {
             done
 
             echo "=========================================="
-            print_success "Sync completed: $success_count succeeded, $fail_count failed"
+            print_success "Backup completed: $success_count succeeded, $fail_count failed"
             print_info "Remote location: $remote_host:$remote_path"
+            print_info "Backup files are saved as .tar.gz on remote server"
             echo "=========================================="
             ;;
 

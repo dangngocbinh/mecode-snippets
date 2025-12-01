@@ -270,75 +270,6 @@ restore_volume_from_file() {
     fi
 }
 
-# Restore from remote VPS
-restore_from_remote() {
-    local remote_host=$1
-    local remote_port=$2
-    local remote_path=$3
-    local target_volume=$4
-    local overwrite=$5
-
-    print_info "Restoring from remote: $remote_host:$remote_path"
-
-    # Check if volume already exists
-    if docker volume inspect "$target_volume" &> /dev/null; then
-        if [ "$overwrite" != "yes" ]; then
-            print_warning "Volume '$target_volume' already exists"
-            read -p "Overwrite existing volume? (yes/no): " confirm
-            if [ "$confirm" != "yes" ]; then
-                print_info "Skipping: $target_volume"
-                return 0
-            fi
-        fi
-        print_info "Removing existing volume: $target_volume"
-        docker volume rm "$target_volume" 2>/dev/null || {
-            print_error "Cannot remove volume '$target_volume' (may be in use)"
-            return 1
-        }
-    fi
-
-    # Create new volume
-    print_info "Creating volume: $target_volume"
-    docker volume create "$target_volume" > /dev/null
-
-    if [ $? -ne 0 ]; then
-        print_error "Failed to create volume: $target_volume"
-        return 1
-    fi
-
-    # Create temporary container
-    local container_name="volume_restore_${target_volume}_$$"
-
-    docker run -d --rm \
-        --name "$container_name" \
-        -v "${target_volume}:/data" \
-        alpine \
-        sleep 3600 > /dev/null
-
-    if [ $? -ne 0 ]; then
-        print_error "Failed to create temporary container"
-        docker volume rm "$target_volume" 2>/dev/null
-        return 1
-    fi
-
-    # Transfer data from remote
-    print_info "Transferring data from remote..."
-    ssh -p "$remote_port" "$remote_host" "cd ${remote_path}/${target_volume} && tar cf - ." | docker cp - "${container_name}:/data/"
-    local transfer_status=$?
-
-    # Cleanup
-    docker stop "$container_name" > /dev/null 2>&1
-
-    if [ $transfer_status -eq 0 ]; then
-        print_success "Successfully restored: $target_volume"
-        return 0
-    else
-        print_error "Failed to restore volume: $target_volume"
-        docker volume rm "$target_volume" 2>/dev/null
-        return 1
-    fi
-}
-
 # Main function
 main() {
     echo ""
@@ -438,57 +369,132 @@ main() {
             print_success "SSH connection OK"
             echo ""
 
-            # List available volumes on remote
-            print_info "Fetching available volumes from remote..."
-            local remote_volumes=($(ssh -p "$remote_port" "$remote_host" "ls -1d ${remote_path}/*/ 2>/dev/null | xargs -n1 basename" | grep -v "_metadata.json"))
+            # List available backup files on remote
+            print_info "Fetching available backup files from remote..."
+            mapfile -t remote_backup_files < <(ssh -p "$remote_port" "$remote_host" "find ${remote_path} -type f -name '*.tar.gz' ! -name '*_metadata.json' 2>/dev/null | sort")
 
-            if [ ${#remote_volumes[@]} -eq 0 ]; then
-                print_error "No volumes found on remote server"
+            if [ ${#remote_backup_files[@]} -eq 0 ]; then
+                print_error "No backup files found on remote server"
                 exit 1
             fi
 
-            echo ""
-            print_info "Available volumes on remote:"
-            echo ""
-            echo "  0) [Restore ALL volumes]"
-
-            for i in "${!remote_volumes[@]}"; do
-                echo "  $((i+1))) ${remote_volumes[$i]}"
-            done
-
-            echo ""
-            echo -e "${YELLOW}Enter volume numbers (comma-separated) or 0 for all:${NC}"
-            read -r selection
-
-            local selected_volumes=()
-
-            if [[ "$selection" == "0" ]]; then
-                selected_volumes=("${remote_volumes[@]}")
-            else
-                IFS=',' read -ra numbers <<< "$selection"
-                for num in "${numbers[@]}"; do
-                    num=$(echo "$num" | xargs)
-                    if [[ "$num" =~ ^[0-9]+$ ]] && [ "$num" -gt 0 ] && [ "$num" -le "${#remote_volumes[@]}" ]; then
-                        selected_volumes+=("${remote_volumes[$((num-1))]}")
-                    fi
+            # Select backups using fzf if available, otherwise fallback to numbered menu
+            if command -v fzf &> /dev/null; then
+                # Prepare display list with filename and size from remote
+                local display_list=()
+                local file_map=()
+                for remote_file in "${remote_backup_files[@]}"; do
+                    local filename=$(basename "$remote_file")
+                    local size=$(ssh -p "$remote_port" "$remote_host" "du -h '$remote_file' | cut -f1")
+                    display_list+=("$filename ($size)")
+                    file_map+=("$remote_file")
                 done
+
+                echo "" >&2
+                print_info "Use arrow keys to navigate, TAB to select/deselect, ENTER to confirm" >&2
+                print_info "Type to search/filter backups" >&2
+                echo "" >&2
+
+                local selected_display=$(printf '%s\n' "${display_list[@]}" | \
+                    fzf --multi \
+                        --height=40% \
+                        --reverse \
+                        --header="Select backups (TAB to select, ENTER to confirm, ESC to select all)" \
+                        --bind 'esc:select-all+accept' \
+                        --prompt="Remote Backups > " \
+                        --preview-window=hidden)
+
+                local selected_backup_files=()
+                if [ -z "$selected_display" ]; then
+                    print_info "No selection or cancelled. Selecting ALL backups..."
+                    selected_backup_files=("${remote_backup_files[@]}")
+                else
+                    while IFS= read -r line; do
+                        for i in "${!display_list[@]}"; do
+                            if [ "${display_list[$i]}" = "$line" ]; then
+                                selected_backup_files+=("${file_map[$i]}")
+                                break
+                            fi
+                        done
+                    done <<< "$selected_display"
+                fi
+            else
+                # Fallback to numbered menu
+                print_warning "fzf not found. Using numbered menu (install fzf for better UI)"
+                echo ""
+                print_info "Available backup files on remote:"
+                echo ""
+                echo "  0) [Restore ALL backups]"
+
+                for i in "${!remote_backup_files[@]}"; do
+                    local filename=$(basename "${remote_backup_files[$i]}")
+                    local size=$(ssh -p "$remote_port" "$remote_host" "du -h '${remote_backup_files[$i]}' | cut -f1")
+                    echo "  $((i+1))) $filename ($size)"
+                done
+
+                echo ""
+                echo -e "${YELLOW}Enter backup numbers (comma-separated) or 0 for all:${NC}"
+                read -r selection
+
+                local selected_backup_files=()
+                if [[ "$selection" == "0" ]]; then
+                    selected_backup_files=("${remote_backup_files[@]}")
+                else
+                    IFS=',' read -ra numbers <<< "$selection"
+                    for num in "${numbers[@]}"; do
+                        num=$(echo "$num" | xargs)
+                        if [[ "$num" =~ ^[0-9]+$ ]] && [ "$num" -gt 0 ] && [ "$num" -le "${#remote_backup_files[@]}" ]; then
+                            selected_backup_files+=("${remote_backup_files[$((num-1))]}")
+                        fi
+                    done
+                fi
+
+                if [ ${#selected_backup_files[@]} -eq 0 ]; then
+                    print_error "No backups selected"
+                    exit 1
+                fi
             fi
 
-            if [ ${#selected_volumes[@]} -eq 0 ]; then
-                print_error "No volumes selected"
-                exit 1
-            fi
+            echo ""
+            print_info "Selected backups:"
+            for file in "${selected_backup_files[@]}"; do
+                echo "  - $(basename "$file")"
+            done
 
             echo ""
             read -p "Overwrite existing volumes without asking? (yes/no) [default: no]: " overwrite_all
             overwrite_all=${overwrite_all:-no}
 
+            echo ""
             local success_count=0
             local fail_count=0
 
-            for volume in "${selected_volumes[@]}"; do
+            # Create temp directory for downloaded backups
+            local temp_dir=$(mktemp -d)
+            trap "rm -rf $temp_dir" EXIT
+
+            for remote_file in "${selected_backup_files[@]}"; do
+                local filename=$(basename "$remote_file")
+                local volume_name=$(extract_volume_name "$filename")
+
                 echo ""
-                if restore_from_remote "$remote_host" "$remote_port" "$remote_path" "$volume" "$overwrite_all"; then
+                print_info "Downloading: $filename"
+                scp -P "$remote_port" "$remote_host:$remote_file" "$temp_dir/" >/dev/null 2>&1
+
+                if [ $? -ne 0 ]; then
+                    print_error "Failed to download: $filename"
+                    ((fail_count++))
+                    continue
+                fi
+
+                print_info "Target volume name: $volume_name"
+                read -p "Press Enter to use this name, or type a new name: " custom_name
+
+                if [ -n "$custom_name" ]; then
+                    volume_name="$custom_name"
+                fi
+
+                if restore_volume_from_file "$temp_dir/$filename" "$volume_name" "$overwrite_all"; then
                     ((success_count++))
                 else
                     ((fail_count++))
